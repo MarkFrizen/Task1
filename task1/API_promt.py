@@ -80,8 +80,8 @@ def call_model(text, prompt):
         # Извлекаем ответ: response -> choices[0] -> message -> content
         return response.choices[0].message.content
 
+    # В случае любой ошибки (сетевой, таймаут и т.д.) возвращаем None
     except Exception as e:
-        # В случае любой ошибки (сетевой, таймаут и т.д.) возвращаем None
         return None
 
 def parse_response(text):
