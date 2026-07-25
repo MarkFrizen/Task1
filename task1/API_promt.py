@@ -154,7 +154,7 @@ def process_file(input_file, output_file, task):
                 continue
             text = row[0]  # Берём первый столбец как текст
             
-            # Вызываем модель и получаем сырый ответ
+            # Вызываем модель и получаем сырой ответ
             raw = call_model(text, prompt)
             
             # Парсим JSON из ответа
@@ -176,7 +176,7 @@ def process_file(input_file, output_file, task):
     
     # Сохраняем в JSON файл
     # ensure_ascii=False - сохраняем кириллицу как есть
-    # indent=2 - делаем красивое форматирование (отступы)
+    # indent=2 - делаем красивое форматирование
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
