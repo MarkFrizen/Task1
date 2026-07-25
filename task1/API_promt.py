@@ -4,7 +4,7 @@ from openai import OpenAI
 
 # --- НАСТРОЙКИ ---
 # Время ожидания ответа от сервера (60 минут)
-TIMEOUT_MINUTES = 60
+TIMEOUT_MINUTES = 30
 
 # Подключаемся к локальному серверу LM Studio
 # base_url - адрес локального сервера, где запущена модель
