@@ -3,8 +3,8 @@ import csv
 from openai import OpenAI
 
 # --- НАСТРОЙКИ ---
-# Время ожидания ответа от сервера (60 минут)
-TIMEOUT_MINUTES = 30
+# Время ожидания ответа от сервера (5 минут)
+TIMEOUT_MINUTES = 5
 
 # Подключаемся к локальному серверу LM Studio
 # base_url - адрес локального сервера, где запущена модель
@@ -17,7 +17,7 @@ client = OpenAI(
 )
 
 # Имя модели, которая загружена в LM Studio
-MODEL_NAME = "qwen/qwen3.6-27b"
+MODEL_NAME = "qwen3-4b-thinking-2507"
 
 def get_prompt(task):
     """
@@ -37,14 +37,14 @@ def get_prompt(task):
         # Модель должна вернуть JSON с тональностью
         # и уровнем уверенности (число от 0 до 1)
         return (
-            "Ты классификатор тональности. Верни ТОЛЬКО JSON.\n"
+            "Ты классификатор тональности. Верни ТОЛЬКО JSON. "
             '{"sentiment": "positive|negative|neutral", "confidence": число от 0 до 1}'
         )
     elif task == "extract":
         # Задача: извлечение именованных сущностей
         # Модель должна вернуть JSON с людьми, местами и организациями
         return (
-            "Ты извлечатель сущностей. Верни ТОЛЬКО JSON.\n"
+            "Ты извлечатель сущностей. Верни ТОЛЬКО JSON. "
             '{"persons": [], "locations": [], "organizations": []}'
         )
 
@@ -67,14 +67,17 @@ def call_model(text, prompt):
     try:
         # Отправляем запрос к модели
         # messages - список сообщений: system (инструкция) и user (текст)
+        # max_tokens уменьшен до 128 для быстроты
+        # temperature = 0 для детерминированного вывода
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": text}
             ],
-            temperature=0,      # Детерминированный вывод (без креативности)
-            max_tokens=512      # Максимум 512 токенов в ответе
+            temperature=0,      # Детерминированный вывод
+            max_tokens=128,     # Уменьшено с 512 до 128 для скорости
+            timeout=600         # 10 минут на запрос
         )
         
         # Извлекаем ответ: response -> choices[0] -> message -> content
@@ -82,6 +85,7 @@ def call_model(text, prompt):
 
     # В случае любой ошибки (сетевой, таймаут и т.д.) возвращаем None
     except Exception as e:
+        print(f"Ошибка при вызове модели: {e}")
         return None
 
 def parse_response(text):
