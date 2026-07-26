@@ -1,7 +1,6 @@
 {
   "task": "classify",
-  "model": "qwen/qwen3.6-27b",
-  "total_count": 2,
+  "total": 2,
   "results": [
     {
       "id": 1,

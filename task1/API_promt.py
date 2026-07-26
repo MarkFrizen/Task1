@@ -17,7 +17,7 @@ client = OpenAI(
 )
 
 # Имя модели, которая загружена в LM Studio
-MODEL_NAME = "qwen3-4b-thinking-2507"
+MODEL_NAME = "qwen/qwen3.5-9b"
 
 def get_prompt(task):
     """
