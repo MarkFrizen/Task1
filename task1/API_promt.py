@@ -182,7 +182,7 @@ def parse_json_response(text: str) -> dict | None:
                 continue
     return None
 
-# -------------------- ПАРСИНГ MARKDOWN ТАБЛИЦЫ (дополнительно) --------------------
+# -------------------- ПАРСИНГ MARKDOWN ТАБЛИЦЫ --------------------
 """Парсит Markdown-таблицу из ответа и возвращает список словарей.
     Ожидается, что таблица имеет заголовок и разделитель."""
 def parse_markdown_table(text: str) -> list[dict] | None:
@@ -191,7 +191,7 @@ def parse_markdown_table(text: str) -> list[dict] | None:
     table_lines = [line for line in lines if '|' in line]
     if len(table_lines) < 3:
         return None
-    # Проверяем, что вторая строка — разделитель (содержит ---)
+    # Проверяем, что вторая строка - разделитель
     if not re.search(r'\|[\s\-:]+\|', table_lines[1]):
         return None
     headers = [h.strip() for h in table_lines[0].split('|') if h.strip()]
@@ -274,7 +274,7 @@ def process_file(
             # Небольшая пауза, чтобы не перегружать сервер
             time.sleep(0.5)
 
-    # Сохраняем результат (если указан output_file)
+    # Сохраняем результат
     if output_file:
         output = {
             "task": task,
@@ -296,7 +296,7 @@ def process_file(
 if __name__ == "__main__":
     print("=== ЗАПУСК СКРИПТА ===")
 
-    # Параметры для эксперимента (можно менять)
+    # Параметры для эксперимента
     TASK = "classify"          # или "extract"
     TECHNIQUES = ["zero", "few", "cot"]
     TEMPERATURES = [0.0, 0.5]  # разные температуры для сравнения
