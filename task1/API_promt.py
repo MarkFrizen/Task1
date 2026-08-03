@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import requests
 
-# Проверка наличия библиотек перед импортом
+# Зависимости: openai, tenacity, requests
 try:
     from openai import OpenAI
     from tenacity import retry, stop_after_attempt, wait_exponential
@@ -14,24 +14,20 @@ except ImportError as e:
     print("Детали ошибки: " + str(e))
     exit(1)
 
-# -------------------- НАСТРОЙКИ --------------------
-BASE_URL = "http://localhost:1234/v1"
+# Настройки подключения к LLM-серверу и пути к файлам
+BASE_URL = "http://192.168.0.140:1234/v1"
 API_KEY = "lm-studio"
-MODEL_NAME = "qwen/qwen3.5-9b"  # Убедитесь, что эта модель загружена в LM Studio
+MODEL_NAME = "qwen/qwen3.5-9b"
 TIMEOUT = 90
-
 INPUT_FILE = "input.csv"
 OUTPUT_FILE = "output.json"
-
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TOP_P = 0.9
 
-# Инициализация клиента OpenAI (работает с локальными серверами)
+# Клиент OpenAI для взаимодействия с локальным сервером (LM Studio)
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=TIMEOUT)
 
-
-# -------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------------------
-
+# Оценивает число токенов в тексте (приблизительно) и проверяет готовность LLM-сервера
 def count_tokens(text: str) -> int:
     """
     Быстрая оценка количества токенов.
@@ -41,10 +37,9 @@ def count_tokens(text: str) -> int:
         return 0
     return max(1, len(text) // 3)
 
-
 def check_server_ready() -> bool:
     """
-    Проверка доступности сервера LM Studio и наличия нужной модели.
+    Проверяет, что LM Studio запущен и искомая модель загружена.
     """
     try:
         resp = requests.get(f"{BASE_URL}/models", timeout=5)
@@ -53,23 +48,18 @@ def check_server_ready() -> bool:
 
         # Получаем список моделей из ответа
         models = models_data.get("data", []) if isinstance(models_data, dict) else models_data
-
         model_found = any(m.get("id") == MODEL_NAME for m in models)
-
         if not model_found:
             print("ERROR: Модель " + MODEL_NAME + " не найдена.")
             print("Доступные модели: " + str([m.get("id") for m in models]))
             return False
-
         print("OK: Сервер LM Studio доступен и модель найдена.")
         return True
     except Exception as e:
         print("ERROR: Сервер не отвечает или недоступен. Проверьте, запущен ли LM Studio. Детали: " + str(e))
         return False
 
-
 # -------------------- ЯДРО ИНЖЕНЕРИИ ПРОМПТОВ --------------------
-
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
 def call_model(
         text: str,
@@ -78,7 +68,7 @@ def call_model(
         top_p: float = 0.9
 ) -> str:
     """
-    Вызов модели с поддержкой разных техник промптинга.
+    Отправляет текст в LLM с техникой zero-/few-shot или chain-of-thought, возвращает сырой ответ.
     """
 
     # Системный промпт: требует строгого формата JSON
@@ -87,7 +77,6 @@ def call_model(
         "Не пиши никакого текста вне JSON. Не используй markdown блоки. "
         "Если не можешь ответить, верни JSON с полем error: не удалось извлечь данные."
     )
-
     user_prompt = ""
 
     if technique == "few":
@@ -127,9 +116,7 @@ def call_model(
 
 def parse_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
     """
-    Очистка и парсинг ответа модели.
-    Исправляет ошибки с markdown-блоками и экранированием символов.
-    Здесь исправлена ошибка Unresolved reference line.
+    Очищает ответ от markdown-разметки и парсит JSON, возвращает dict или ошибку.
     """
     clean_text = raw_text.strip()
 
@@ -157,7 +144,7 @@ def parse_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
         # Безопасный возврат ошибки вместо исключения
         return {"error": "invalid_json", "raw_output": clean_text[:200]}
 
-# -------------------- ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ --------------------
+# Загружает строки из CSV-файла в список словарей
 def load_csv_data(filepath: str) -> List[Dict[str, str]]:
     """
     Загрузка данных из CSV файла.
@@ -177,7 +164,7 @@ def load_csv_data(filepath: str) -> List[Dict[str, str]]:
 
 def main():
     """
-    Главный оркестратор скрипта.
+    Запускает проверку сервера, загружает CSV, обрабатывает каждый текст через LLM и сохраняет результаты в JSON.
     """
     print("=== ЗАПУСК СКРИПТА ===")
     if not check_server_ready():
