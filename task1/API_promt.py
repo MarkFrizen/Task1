@@ -14,7 +14,7 @@ except ImportError as e:
     exit(1)
 
 # Настройки подключения к серверу и пути к входному-выходному файлам
-BASE_URL = "http://192.168.0.140:1234/v1"
+BASE_URL = "http://localhost:1234/v1"
 API_KEY = "lm-studio"
 MODEL_NAME = "qwen/qwen3.5-9b"
 TIMEOUT_MINUTES = 10
@@ -104,7 +104,6 @@ def call_model(
     )
     choice = response.choices[0]
     result = choice.message.content if choice.message else None
-    print(f"  DEBUG: finish_reason={choice.finish_reason}, message_type={type(choice.message)}, content_len={len(result) if result else 0}")
     return result if result else ""
 
 # Очистка ответа от markdown, парсинг JSON, безопасная обработка ошибок
@@ -193,7 +192,10 @@ def main():
             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
             status = "OK" if (isinstance(parsed_data, dict) and "error" not in parsed_data) else "PARSE_ERROR"
-            print(status + ": Обработано за " + str(round(elapsed, 2)) + " сек.")
+            if status == "OK":
+                print(status + ": Обработано за " + str(round(elapsed, 2)) + " сек.")
+            else:
+                print("Обработано за " + str(round(elapsed, 2)) + " сек.")
         except APIConnectionError as e:
             print("ERROR: Connection на строке " + str(idx) + ": " + str(e))
             results.append({"index": idx, "input_text": text_content, "error": "connection_error", "details": str(e)})
