@@ -1,341 +1,242 @@
 import json
-import csv
 import time
-import re
-import tiktoken
-from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import csv
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+import requests
+
+# Проверка наличия библиотек перед импортом
+try:
+    from openai import OpenAI
+    from tenacity import retry, stop_after_attempt, wait_exponential
+except ImportError as e:
+    print("ОШИБКА: Не найдена необходимая библиотека. Установите зависимости: pip install openai tenacity requests")
+    print("Детали ошибки: " + str(e))
+    exit(1)
 
 # -------------------- НАСТРОЙКИ --------------------
-BASE_URL = "http://192.168.0.140:1234/v1"   # Ваш локальный сервер
-API_KEY = "not-needed"
-MODEL_NAME = "qwen/qwen3.5-9b"
-TIMEOUT = 600
+BASE_URL = "http://localhost:1234/v1"
+API_KEY = "lm-studio"
+MODEL_NAME = "qwen/qwen3.5-9b"  # Убедитесь, что эта модель загружена в LM Studio
+TIMEOUT = 90
 
-# Создаём клиент один раз
+INPUT_FILE = "input.csv"
+OUTPUT_FILE = "output.json"
+
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_TOP_P = 0.9
+
+# Инициализация клиента OpenAI (работает с локальными серверами)
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=TIMEOUT)
 
-# -------------------- ПРОМПТЫ --------------------
-"""Возвращает системный промпт в зависимости от техники и задачи.
-technique: "zero", "few", "cot"
-task: "classify" (тональность) или "extract" (сущности)"""
-def get_prompt(technique: str, task: str) -> str:
-    base_instruction = {
-        "classify": (
-            "Ты классификатор тональности. Верни ТОЛЬКО JSON в формате:\n"
-            '{"sentiment": "positive|negative|neutral", "confidence": число от 0 до 1}'
-        ),
-        "extract": (
-            "Ты извлекатель именованных сущностей. Верни ТОЛЬКО JSON в формате:\n"
-            '{"persons": [список имён], "locations": [список мест], "organizations": [список организаций]}'
-        )
-    }[task]
-    if technique == "zero":
-        return base_instruction
-    elif technique == "few":
-        # Примеры для Few-shot
-        examples = {
-            "classify": (
-                "Примеры:\n"
-                'Текст: "Акции компании выросли на 5% после отчёта." → '
-                '{"sentiment": "positive", "confidence": 0.95}\n'
-                'Текст: "Ураган разрушил десятки домов, жертв нет." → '
-                '{"sentiment": "negative", "confidence": 0.9}\n'
-                'Текст: "Сегодня облачно, температура +15°C." → '
-                '{"sentiment": "neutral", "confidence": 0.8}\n\n'
-                "Теперь классифицируй следующий текст, верни ТОЛЬКО JSON."
-            ),
-            "extract": (
-                "Примеры:\n"
-                'Текст: "Илон Маск посетил Берлин и встретился с канцлером." → '
-                '{"persons": ["Илон Маск"], "locations": ["Берлин"], "organizations": []}\n'
-                'Текст: "Microsoft и Google объявили о партнёрстве в Лондоне." → '
-                '{"persons": [], "locations": ["Лондон"], "organizations": ["Microsoft", "Google"]}\n\n'
-                "Теперь извлеки сущности из следующего текста, верни ТОЛЬКО JSON."
-            )
-        }[task]
-        return examples + "\n\n" + base_instruction
-    elif technique == "cot":
-        # Chain-of-Thought: просим сначала объяснить рассуждения, затем дать JSON
-        cot_instruction = (
-            "Реши задачу пошагово. Сначала кратко опиши свои рассуждения, "
-            "затем в конце дай финальный ответ в виде JSON в формате:\n"
-            "{\"sentiment\": \"positive|negative|neutral\", \"confidence\": число от 0 до 1}"
-        )
-        return cot_instruction
 
-    else:
-        raise ValueError(f"Неизвестная техника: {technique}")
+# -------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------------------
 
-# -------------------- ПОДСЧЁТ ТОКЕНОВ --------------------
-def count_tokens(text: str, model: str = MODEL_NAME) -> int:
-    """Подсчитывает количество токенов в тексте с помощью tiktoken."""
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError:
-        encoding = tiktoken.get_encoding("cl100k_base")  # fallback
-    return len(encoding.encode(text))
-
-# -------------------- ВЫЗОВ МОДЕЛИ С ПОВТОРАМИ --------------------
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((Exception,)),  # повторяем при любой ошибке
-    reraise=True
-)
-def call_model(text: str, system_prompt: str, temperature: float = 0.0, top_p: float = 1.0) -> dict:
+def count_tokens(text: str) -> int:
     """
-    Отправляет запрос к модели и возвращает словарь с ответом и метаданными.
-    При ошибках повторяет до 3 раз с задержкой.
+    Быстрая оценка количества токенов.
+    Формула: примерно 3 символа = 1 токен.
     """
-    # Проверяем длину - предупреждаем, если слишком много
-    total_tokens = count_tokens(system_prompt + text)
-    if total_tokens > 3500:
-        print(f"[WARNING] Внимание: {total_tokens} токенов, может превысить лимит контекста.")
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text}
-    ]
-    print(f"\nОтправка запроса: {text[:60]}... (токенов: {total_tokens})")
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=2048,
-        timeout=TIMEOUT
-    )
-
-    # Извлекаем сообщение
-    message = response.choices[0].message
-    raw_content = message.content or ""
-    # Проверяем reasoning_content только если content пустой
-    if not raw_content and hasattr(message, 'reasoning_content') and message.reasoning_content:
-        raw_content = message.reasoning_content
-    print(f"Получен ответ (длина {len(raw_content)} символов).")
-
-    # Пытаемся получить использованные токены из ответа
-    usage = response.usage if hasattr(response, 'usage') else None
-    if usage:
-        total_tokens_used = usage.total_tokens
-        prompt_tokens = usage.prompt_tokens
-        completion_tokens = usage.completion_tokens
-    else:
-        # Если нет, считаем приблизительно
-        total_tokens_used = count_tokens(system_prompt + text) + count_tokens(raw_content)
-        prompt_tokens = count_tokens(system_prompt + text)
-        completion_tokens = count_tokens(raw_content)
-    return {
-        "content": raw_content,
-        "total_tokens": total_tokens_used,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "finish_reason": response.choices[0].finish_reason
-    }
-
-# -------------------- ПАРСИНГ JSON --------------------
-def parse_json_response(text: str) -> dict | None:
-    """Извлекает JSON из текста ответа модели."""
     if not text:
-        return None
-    
-    # Ищем все возможные JSON-объекты в тексте
-    import json
-    
-    # Находим все позиции открывающих скобок
-    start_positions = []
-    depth = 0
-    for i, char in enumerate(text):
-        if char == '{':
-            if depth == 0:
-                start_positions.append(i)
-            depth += 1
-        elif char == '}':
-            depth -= 1
-    
-    # Проверяем каждый возможный JSON
-    for start in start_positions:
-        # Находим соответствующую закрывающую скобку
-        depth = 0
-        end = -1
-        for i in range(start, len(text)):
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            json_str = text[start:end+1]
-            try:
-                parsed = json.loads(json_str)
-                # Проверяем, содержит ли JSON нужные ключи
-                if 'sentiment' in parsed and 'confidence' in parsed:
-                    return parsed
-                # Если это cot формат, проверяем результат внутри
-                if 'reasoning' in parsed and 'result' in parsed:
-                    result = parsed['result']
-                    if isinstance(result, dict) and 'sentiment' in result and 'confidence' in result:
-                        return result
-            except json.JSONDecodeError:
-                continue
-    return None
+        return 0
+    return max(1, len(text) // 3)
 
-# -------------------- ПАРСИНГ MARKDOWN ТАБЛИЦЫ --------------------
-"""Парсит Markdown-таблицу из ответа и возвращает список словарей.
-    Ожидается, что таблица имеет заголовок и разделитель."""
-def parse_markdown_table(text: str) -> list[dict] | None:
-    lines = text.strip().split('\n')
-    # Ищем строки, содержащие '|'
-    table_lines = [line for line in lines if '|' in line]
-    if len(table_lines) < 3:
-        return None
-    # Проверяем, что вторая строка - разделитель
-    if not re.search(r'\|[\s\-:]+\|', table_lines[1]):
-        return None
-    headers = [h.strip() for h in table_lines[0].split('|') if h.strip()]
-    rows = []
-    for row_line in table_lines[2:]:
-        cells = [c.strip() for c in row_line.split('|') if c.strip()]
-        if len(cells) == len(headers):
-            rows.append(dict(zip(headers, cells)))
-    return rows if rows else None
 
-# -------------------- ОБРАБОТКА ФАЙЛА --------------------
-"""
-    Обрабатывает CSV файл и сохраняет результаты.
-    Если output_format == "markdown", модель попросит вернуть Markdown-таблицу,
-    и мы её распарсим.
+def check_server_ready() -> bool:
     """
-def process_file(
-        input_file: str,
-        output_file: str,
-        task: str,
+    Проверка доступности сервера LM Studio и наличия нужной модели.
+    """
+    try:
+        resp = requests.get(f"{BASE_URL}/models", timeout=5)
+        resp.raise_for_status()
+        models_data = resp.json()
+
+        # Получаем список моделей из ответа
+        models = models_data.get("data", []) if isinstance(models_data, dict) else models_data
+
+        model_found = any(m.get("id") == MODEL_NAME for m in models)
+
+        if not model_found:
+            print("ERROR: Модель " + MODEL_NAME + " не найдена.")
+            print("Доступные модели: " + str([m.get("id") for m in models]))
+            return False
+
+        print("OK: Сервер LM Studio доступен и модель найдена.")
+        return True
+    except Exception as e:
+        print("ERROR: Сервер не отвечает или недоступен. Проверьте, запущен ли LM Studio. Детали: " + str(e))
+        return False
+
+
+# -------------------- ЯДРО ИНЖЕНЕРИИ ПРОМПТОВ --------------------
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+def call_model(
+        text: str,
         technique: str = "zero",
         temperature: float = 0.0,
-        top_p: float = 1.0,
-        output_format: str = "json"   # "json" или "markdown"
-):
-    system_prompt = get_prompt(technique, task)
+        top_p: float = 0.9
+) -> str:
+    """
+    Вызов модели с поддержкой разных техник промптинга.
+    """
 
-    # Если нужен Markdown, модифицируем промпт
-    if output_format == "markdown":
-        system_prompt += (
-            "\nВерни ответ в виде Markdown-таблицы с колонками: "
-            "текст, тональность, уверенность (или сущности)."
+    # Системный промпт: требует строгого формата JSON
+    system_prompt = (
+        "Ты строгий ассистент. Твой ответ ДОЛЖЕН быть валидным JSON объектом. "
+        "Не пиши никакого текста вне JSON. Не используй markdown блоки. "
+        "Если не можешь ответить, верни JSON с полем error: не удалось извлечь данные."
+    )
+
+    user_prompt = ""
+
+    if technique == "few":
+        examples = [
+            {"text": "Компания Apple выпустила новый iPhone 15 Pro Max в черном цвете.", "category": "ТЕХНОЛОГИИ", "entities": ["Apple", "iPhone 15 Pro Max"]},
+            {"text": "Курс доллара вырос до 92 рублей на фоне новостей из ЦБ.", "category": "ФИНАНСЫ", "entities": ["доллар", "ЦБ"]}
+        ]
+        examples_str = "\n".join([f"Текст: {e['text']}\nОтвет: {e['category']}, {e['entities']}" for e in examples])
+        user_prompt = (
+                "Классифицируй текст и извлеки сущности. Используй формат JSON. "
+                "Примеры:\n" + examples_str + "\n\n"
+                                              "Текст для обработки:\n" + text
         )
-    results = []
-    with open(input_file, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        next(reader, None)  # пропускаем заголовок
-        for idx, row in enumerate(reader, 1):
-            if not row or not row[0]:
-                continue
-            text = row[0]
-            print(f"\n--- Обработка текста {idx} ---")
-            try:
-                response_data = call_model(
-                    text,
-                    system_prompt,
-                    temperature=temperature,
-                    top_p=top_p
-                )
-                raw = response_data["content"]
+    elif technique == "cot":
+        user_prompt = (
+                "Классифицируй текст и извлеки сущности. Сначала напиши краткий план рассуждений step_by_step, затем дай финальный ответ в формате JSON. "
+                "Текст для обработки:\n" + text
+        )
+    else: # zero-shot
+        user_prompt = (
+                "Классифицируй текст и извлеки сущности. Верни ТОЛЬКО JSON. "
+                "Текст для обработки:\n" + text
+        )
 
-                # Парсим в зависимости от формата
-                if output_format == "json":
-                    parsed = parse_json_response(raw)
-                else:  # markdown
-                    parsed = parse_markdown_table(raw)
+    # Отправка запроса к LLM
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=512
+    )
+    return response.choices[0].message.content
 
-                prediction = parsed if parsed else None
+def parse_json_response(raw_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Очистка и парсинг ответа модели.
+    Исправляет ошибки с markdown-блоками и экранированием символов.
+    Здесь исправлена ошибка Unresolved reference line.
+    """
+    clean_text = raw_text.strip()
 
-                # Логируем
-                print(f"Предсказание: {prediction}")
-                print(f"Токенов использовано: {response_data['total_tokens']}")
-                results.append({
-                    "id": idx,
-                    "text": text,
-                    "prediction": prediction,
-                    "raw_response": raw,
-                    "tokens_used": response_data["total_tokens"],
-                    "finish_reason": response_data["finish_reason"]
-                })
-            except Exception as e:
-                print(f"[ERROR] Ошибка при обработке текста {idx}: {e}")
-                results.append({
-                    "id": idx,
-                    "text": text,
-                    "error": str(e),
-                    "prediction": None
-                })
+    # Очистка от markdown блоков, если модель их добавила
+    if clean_text.startswith("```"):
+        lines = clean_text.splitlines()
 
-            # Небольшая пауза, чтобы не перегружать сервер
-            time.sleep(0.5)
+        # Ищем первую строку, содержащую открывающую фигурную скобку
+        start_idx = next((i for i, line in enumerate(lines) if "{" in line), None)
 
-    # Сохраняем результат
-    if output_file:
-        output = {
-            "task": task,
-            "technique": technique,
-            "temperature": temperature,
-            "top_p": top_p,
-            "output_format": output_format,
-            "total": len(results),
-            "results": results
-        }
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
-        print(f"\n[OK] Результаты сохранены в {output_file}")
-    
-    # Возвращаем результаты для сбора в один файл
-    return results
+        # Ищем последнюю строку, содержащую закрывающую фигурную скобку.
+        # ВАЖНО: Здесь исправлена ошибка. Мы используем reversed, но потом конвертируем индекс.
+        # Переменная line корректно определена в этом генераторе.
+        rev_end_idx = next((i for i, line in enumerate(reversed(lines)) if "}" in line), None)
+        if rev_end_idx is not None:
+            end_idx = len(lines) - 1 - rev_end_idx
+        else:
+            end_idx = None
+        if start_idx is not None and end_idx is not None and start_idx <= end_idx:
+            # ВАЖНО: Используем \n (один слэш). Двойной слэш сломает JSON.
+            clean_text = "\n".join(lines[start_idx:end_idx+1])
+    try:
+        return json.loads(clean_text)
+    except json.JSONDecodeError:
+        # Безопасный возврат ошибки вместо исключения
+        return {"error": "invalid_json", "raw_output": clean_text[:200]}
 
-# -------------------- ТОЧКА ВХОДА --------------------
-if __name__ == "__main__":
+# -------------------- ФУНКЦИИ РАБОТЫ С ФАЙЛАМИ --------------------
+def load_csv_data(filepath: str) -> List[Dict[str, str]]:
+    """
+    Загрузка данных из CSV файла.
+    """
+    data = []
+    try:
+        with open(filepath, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                clean_row = {k: (v.strip() if v else "") for k, v in row.items()}
+                data.append(clean_row)
+    except FileNotFoundError:
+        print("ERROR: Файл " + filepath + " не найден. Создайте файл с данными.")
+    return data
+
+# -------------------- ОСНОВНОЙ ЦИКЛ ВЫПОЛНЕНИЯ --------------------
+
+def main():
+    """
+    Главный оркестратор скрипта.
+    """
     print("=== ЗАПУСК СКРИПТА ===")
+    if not check_server_ready():
+        print("Скрипт остановлен из-за проблем с подключением к серверу.")
+        return
 
-    # Параметры для эксперимента
-    TASK = "classify"          # или "extract"
-    TECHNIQUES = ["zero", "few", "cot"]
-    TEMPERATURES = [0.0, 0.5]  # разные температуры для сравнения
-    TOP_P = 0.9
-    OUTPUT_FILE = "output.json"  # единый файл для всех результатов
-    
-    # Очищаем output.json перед началом экспериментов
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump({}, f, ensure_ascii=False)
-    print(f"[INFO] Файл {OUTPUT_FILE} очищен")
+    # Инициализация пустого JSON файла результатов
+    output_path = Path(OUTPUT_FILE)
+    output_path.write_text("[]", encoding="utf-8")
+    print("Файл " + OUTPUT_FILE + " подготовлен.")
+    data = load_csv_data(INPUT_FILE)
+    if not data:
+        print("Нет данных для обработки. Проверьте файл input.csv.")
+        return
+    print("Загружено записей: " + str(len(data)))
 
-    # Собираем все результаты в один список
-    all_results = {
-        "task": TASK,
-        "total_experiments": len(TECHNIQUES) * len(TEMPERATURES),
-        "experiments": []
-    }
-
-    # Прогоняем несколько экспериментов
-    for technique in TECHNIQUES:
-        for temp in TEMPERATURES:
-            print(f"\n[EXPERIMENT] Эксперимент: technique={technique}, temperature={temp}")
-            experiment_results = process_file(
-                input_file="input.csv",
-                output_file="",  # не сохраняем промежуточные файлы
-                task=TASK,
-                technique=technique,
-                temperature=temp,
-                top_p=TOP_P,
-                output_format="json"
-            )
-            all_results["experiments"].append({
+    # Параметры эксперимента
+    technique = "few"
+    temperature = 0.0
+    top_p = 0.9
+    print("Запуск эксперимента: technique=" + technique + ", temp=" + str(temperature) + ", top_p=" + str(top_p))
+    results = []
+    for idx, row in enumerate(data, start=1):
+        # Определение поля с текстом
+        text_content = row.get("text") or row.get("content") or row.get(list(row.keys())[0])
+        if not text_content:
+            continue
+        print("--- Обработка текста " + str(idx) + " из " + str(len(data)) + " ---")
+        tokens_count = count_tokens(text_content)
+        print("Оценка токенов: " + str(tokens_count))
+        try:
+            start_time = time.time()
+            raw_response = call_model(text_content, technique, temperature, top_p)
+            elapsed = time.time() - start_time
+            parsed_data = parse_json_response(raw_response)
+            result_entry = {
+                "index": idx,
+                "input_text": text_content,
+                "raw_output": raw_response,
+                "structured_output": parsed_data,
+                "tokens_input": tokens_count,
+                "processing_time_sec": round(elapsed, 2),
                 "technique": technique,
-                "temperature": temp,
-                "results": experiment_results
-            })
+                "temperature": temperature,
+                "top_p": top_p
+            }
+            results.append(result_entry)
 
-    # Сохраняем все результаты в один файл
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(all_results, f, ensure_ascii=False, indent=2)
-    print(f"\n[OK] Все результаты сохранены в {OUTPUT_FILE}")
-    print("\n=== ВСЕ ЭКСПЕРИМЕНТЫ ЗАВЕРШЕНЫ ===")
+            # Построчная запись в файл (защита от потери данных)
+            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            status = "OK" if (isinstance(parsed_data, dict) and "error" not in parsed_data) else "PARSE_ERROR"
+            print(status + ": Обработано за " + str(elapsed) + " сек.")
+        except Exception as e:
+            print("ERROR: Критическая ошибка на строке " + str(idx) + ": " + str(e))
+            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+    print("=== ЗАВЕРШЕНО ===")
+    print("Всего успешно обработано: " + str(len(results)))
+    print("Результаты сохранены в " + OUTPUT_FILE)
+if __name__ == "__main__":
+    main()
